@@ -10,7 +10,6 @@ from spleeter.separator import Separator
 
 app = FastAPI()
 
-# אפשור CORS מלא למניעת חסימות בדפדפן
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -28,7 +27,7 @@ class ProcessRequest(BaseModel):
 
 @app.get("/")
 def home():
-    return {"status": "ok", "message": "Karaoke Backend is live and stable"}
+    return {"status": "ok", "message": "Karaoke Backend is live"}
 
 @app.post("/process")
 async def process_video(req: ProcessRequest):
@@ -36,17 +35,20 @@ async def process_video(req: ProcessRequest):
     if not url:
         raise HTTPException(status_code=400, detail="Missing URL")
 
-    # יצירת מזהה ייחודי לכל בקשה כדי למנוע התנגשויות קבצים
+    # אם המשתמש הדביק קישור של Radio/Playlist, ניקח רק את הווידאו הבודד
+    if "list=" in url or "start_radio=" in url:
+        url = url.split("&list=")[0].split("?list=")[0]
+
     job_id = str(uuid.uuid4())[:8]
     job_dir = os.path.join(BASE_OUTPUT_DIR, job_id)
     os.makedirs(job_dir, exist_ok=True)
 
     input_audio_path = os.path.join(job_dir, "input")
 
-    # הגדרות yt-dlp חסינות-חסימות (Android, iOS, Web fallback)
     ydl_opts = {
         'format': 'ba/b',
         'outtmpl': f"{input_audio_path}.%(ext)s",
+        'noplaylist': True,  # מכריח הורדה של שיר בודד בלבד
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',
@@ -54,42 +56,38 @@ async def process_video(req: ProcessRequest):
         }],
         'extractor_args': {
             'youtube': {
-                'player_client': ['android', 'ios', 'web_creator'],
+                'player_client': ['mweb', 'android', 'ios'],
                 'skip': ['hls', 'dash']
             }
         },
-        'match_filter': yt_dlp.utils.match_filter_func('duration <= 600'),  # הגבלה ל-10 דקות למניעת קריסת זיכרון
+        'match_filter': yt_dlp.utils.match_filter_func('duration <= 600'),
         'nocheckcertificate': True,
         'quiet': True,
         'no_warnings': True
     }
 
-    # 1. הורדה מיוטיוב
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
     except Exception as e:
-        # ניקוי תיקייה במקרה של שגיאה
         shutil.rmtree(job_dir, ignore_errors=True)
         raise HTTPException(
             status_code=500, 
-            detail=f"YouTube Error: הסרטון לא ניתן להורדה (ייתכן שהוא מוגבל/ארוך מ-10 דקות). פרטים: {str(e)}"
+            detail=f"YouTube Error: {str(e)}"
         )
 
     downloaded_file = f"{input_audio_path}.mp3"
     if not os.path.exists(downloaded_file):
         shutil.rmtree(job_dir, ignore_errors=True)
-        raise HTTPException(status_code=500, detail="Audio file extraction failed")
+        raise HTTPException(status_code=500, detail="Extraction failed")
 
-    # 2. הפרדת קולות ב-Spleeter
     try:
         separator = Separator('spleeter:2stems')
         separator.separate_to_file(downloaded_file, job_dir)
     except Exception as e:
         shutil.rmtree(job_dir, ignore_errors=True)
-        raise HTTPException(status_code=500, detail=f"Separation Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Spleeter Error: {str(e)}")
 
-    # הקישורים שיוחזרו ל-Frontend
     return {
         "status": "success",
         "accompaniment": f"/output/{job_id}/input/accompaniment.mp3",
