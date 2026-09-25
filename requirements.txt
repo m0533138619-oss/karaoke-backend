@@ -1,4 +1,6 @@
 fastapi
 uvicorn
+pydantic
 yt-dlp
-spleeter
+spleeter==2.4.0
+protobuf==3.20.3
