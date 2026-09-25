@@ -9,7 +9,6 @@ from spleeter.separator import Separator
 
 app = FastAPI()
 
-# מאפשר פניות מכל אתר (CORS)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -18,7 +17,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# הגדרת תיקיית פלט לקבצי שמע
 os.makedirs("output", exist_ok=True)
 app.mount("/output", StaticFiles(directory="output"), name="output")
 
@@ -35,14 +33,13 @@ async def process_video(req: ProcessRequest):
     if not url:
         raise HTTPException(status_code=400, detail="Missing URL")
     
-    # ניקוי תיקיית הפלט
     for f in glob.glob("output/*"):
         try:
             os.remove(f)
         except Exception:
             pass
 
-    # הורדת השמע מ-YouTube
+    # הגדרות מתקדמות לעקיפת חסימת 403 ב-YouTube
     out_template = "output/song.%(ext)s"
     ydl_opts = {
         'format': 'bestaudio/best',
@@ -52,6 +49,9 @@ async def process_video(req: ProcessRequest):
             'preferredcodec': 'mp3',
             'preferredquality': '192',
         }],
+        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'referer': 'https://www.youtube.com/',
+        'nocheckcertificate': True,
         'quiet': True
     }
 
@@ -61,7 +61,6 @@ async def process_video(req: ProcessRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"YouTube Download Error: {str(e)}")
 
-    # הפרדת קולות באמצעות Spleeter
     try:
         separator = Separator('spleeter:2stems')
         separator.separate_to_file('output/song.mp3', 'output/')
