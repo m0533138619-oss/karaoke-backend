@@ -1,5 +1,6 @@
 import os
-import glob
+import shutil
+import uuid
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -9,6 +10,7 @@ from spleeter.separator import Separator
 
 app = FastAPI()
 
+# אפשור CORS מלא למניעת חסימות בדפדפן
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -17,58 +19,79 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-os.makedirs("output", exist_ok=True)
-app.mount("/output", StaticFiles(directory="output"), name="output")
+BASE_OUTPUT_DIR = "output"
+os.makedirs(BASE_OUTPUT_DIR, exist_ok=True)
+app.mount("/output", StaticFiles(directory=BASE_OUTPUT_DIR), name="output")
 
 class ProcessRequest(BaseModel):
     url: str
 
 @app.get("/")
 def home():
-    return {"status": "ok", "message": "Karaoke Backend is running"}
+    return {"status": "ok", "message": "Karaoke Backend is live and stable"}
 
 @app.post("/process")
 async def process_video(req: ProcessRequest):
     url = req.url
     if not url:
         raise HTTPException(status_code=400, detail="Missing URL")
-    
-    for f in glob.glob("output/*"):
-        try:
-            os.remove(f)
-        except Exception:
-            pass
 
-    # הגדרות מתקדמות לעקיפת חסימת 403 ב-YouTube
-    out_template = "output/song.%(ext)s"
+    # יצירת מזהה ייחודי לכל בקשה כדי למנוע התנגשויות קבצים
+    job_id = str(uuid.uuid4())[:8]
+    job_dir = os.path.join(BASE_OUTPUT_DIR, job_id)
+    os.makedirs(job_dir, exist_ok=True)
+
+    input_audio_path = os.path.join(job_dir, "input")
+
+    # הגדרות yt-dlp חסינות-חסימות (Android, iOS, Web fallback)
     ydl_opts = {
-        'format': 'bestaudio/best',
-        'outtmpl': out_template,
+        'format': 'ba/b',
+        'outtmpl': f"{input_audio_path}.%(ext)s",
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',
             'preferredquality': '192',
         }],
-        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'referer': 'https://www.youtube.com/',
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'ios', 'web_creator'],
+                'skip': ['hls', 'dash']
+            }
+        },
+        'match_filter': yt_dlp.utils.match_filter_func('duration <= 600'),  # הגבלה ל-10 דקות למניעת קריסת זיכרון
         'nocheckcertificate': True,
-        'quiet': True
+        'quiet': True,
+        'no_warnings': True
     }
 
+    # 1. הורדה מיוטיוב
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"YouTube Download Error: {str(e)}")
+        # ניקוי תיקייה במקרה של שגיאה
+        shutil.rmtree(job_dir, ignore_errors=True)
+        raise HTTPException(
+            status_code=500, 
+            detail=f"YouTube Error: הסרטון לא ניתן להורדה (ייתכן שהוא מוגבל/ארוך מ-10 דקות). פרטים: {str(e)}"
+        )
 
+    downloaded_file = f"{input_audio_path}.mp3"
+    if not os.path.exists(downloaded_file):
+        shutil.rmtree(job_dir, ignore_errors=True)
+        raise HTTPException(status_code=500, detail="Audio file extraction failed")
+
+    # 2. הפרדת קולות ב-Spleeter
     try:
         separator = Separator('spleeter:2stems')
-        separator.separate_to_file('output/song.mp3', 'output/')
+        separator.separate_to_file(downloaded_file, job_dir)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Spleeter Separation Error: {str(e)}")
+        shutil.rmtree(job_dir, ignore_errors=True)
+        raise HTTPException(status_code=500, detail=f"Separation Error: {str(e)}")
 
+    # הקישורים שיוחזרו ל-Frontend
     return {
         "status": "success",
-        "accompaniment": "/output/song/accompaniment.mp3",
-        "vocals": "/output/song/vocals.mp3"
+        "accompaniment": f"/output/{job_id}/input/accompaniment.mp3",
+        "vocals": f"/output/{job_id}/input/vocals.mp3"
     }
